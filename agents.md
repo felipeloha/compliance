@@ -10,6 +10,16 @@
 
 This is non-negotiable. The plan must be reviewed and approved before execution starts.
 
+## Testing requirements in plans
+
+Any plan that touches infrastructure, Lambda code, or test files **must** include a testing section that covers:
+
+1. **Cleanup strategy** - how is leftover state from previous runs handled? (e.g. session-scoped autouse fixture that truncates tables before the session)
+2. **Smoke test** - what is the minimal test that proves the infrastructure is up and the deployed resources are reachable?
+3. **Fixture ordering** - which fixtures must run before others, and which fail fast if prerequisites are missing?
+
+Do not treat cleanup as an afterthought. If it is not in the plan, add it before presenting the plan for review.
+
 ---
 
 This repository uses a shared `ai-docs/` directory for project knowledge, feature specs, and reusable skills.

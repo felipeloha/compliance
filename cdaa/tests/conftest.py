@@ -256,3 +256,39 @@ def ctl_httpserver(localstack_client):
 
     server.clear()
     server.stop()
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped cleanup: truncate tables before the test session runs
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session", autouse=True)
+def truncate_requests_table(dynamodb_table):
+    """Delete all items from the access_requests table before the session."""
+    _truncate_table(dynamodb_table, ["request_id", "timestamp"])
+
+
+@pytest.fixture(scope="session", autouse=True)
+def truncate_jira_captures(jira_capture_table):
+    """Delete all items from the jira-captures table before the session."""
+    _truncate_table(jira_capture_table, ["id"])
+
+
+def _truncate_table(table, key_names: list[str]) -> None:
+    expr_names = {f"#{k}": k for k in key_names}
+    projection = ", ".join(expr_names.keys())
+
+    response = table.scan(ProjectionExpression=projection, ExpressionAttributeNames=expr_names)
+    with table.batch_writer() as batch:
+        for item in response.get("Items", []):
+            batch.delete_item(Key={k: item[k] for k in key_names})
+    while "LastEvaluatedKey" in response:
+        response = table.scan(
+            ProjectionExpression=projection,
+            ExpressionAttributeNames=expr_names,
+            ExclusiveStartKey=response["LastEvaluatedKey"],
+        )
+        with table.batch_writer() as batch:
+            for item in response.get("Items", []):
+                batch.delete_item(Key={k: item[k] for k in key_names})
