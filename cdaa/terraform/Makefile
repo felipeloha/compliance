@@ -23,7 +23,7 @@ plan:
 	terraform plan -var-file=$(VARFILE) $(TARGETS)
 
 apply:
-	terraform apply -var-file=$(VARFILE) $(TARGETS)
+	terraform apply -auto-approve -var-file=$(VARFILE) $(TARGETS)
 
 destroy:
 	terraform destroy -var-file=$(VARFILE) $(TARGETS)

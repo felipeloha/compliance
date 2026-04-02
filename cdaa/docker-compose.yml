@@ -4,7 +4,7 @@ services:
     ports:
       - "4566:4566"
     environment:
-      SERVICES: lambda,dynamodb,ssm,cloudtrail,iam
+      SERVICES: lambda,dynamodb,ssm,cloudtrail,iam,logs,cloudwatch
       LAMBDA_EXECUTOR: docker
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:

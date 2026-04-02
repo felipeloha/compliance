@@ -8,6 +8,7 @@ See ai-docs/skills/cdaa-integration-tests/SKILL.md for setup steps.
 import io
 import json
 import os
+import time
 import zipfile
 
 import pytest
@@ -34,11 +35,13 @@ CTL_FORWARDER_FN = f"{NAME_PREFIX}-log-ctl-forwarder"
 RECONCILIATION_FN = f"{NAME_PREFIX}-daily-reconciliation"
 JIRA_STUB_FN = f"{NAME_PREFIX}-jira-stub"
 
-# CloudTrail Lake mock server
+# HTTP mock servers reachable from Docker Lambda containers.
 # On Mac/Windows Docker Desktop use host.docker.internal.
 # On Linux: export CTL_HTTPSERVER_HOST=$(ip route show default | awk '/default/{print $3}')
 CTL_HTTPSERVER_PORT = 9090
+JIRA_HTTPSERVER_PORT = 9091
 CTL_HTTPSERVER_HOST = os.environ.get("CTL_HTTPSERVER_HOST", "host.docker.internal")
+JIRA_HTTPSERVER_HOST = CTL_HTTPSERVER_HOST
 
 # X-Amz-Target values sent by the boto3 cloudtrail client
 CTL_TARGET_START_QUERY = "CloudTrail_20131101.StartQuery"
@@ -126,73 +129,94 @@ def ssm_params(localstack_client):
 _JIRA_STUB_CODE = '''
 import json
 import os
-import boto3
+import urllib.request
 
 def handler(event, context):
-    # No explicit endpoint_url — localstack injects AWS_ENDPOINT_URL into the
-    # Lambda container environment so boto3 routes calls to localstack automatically.
-    ddb = boto3.resource("dynamodb")
-    table = ddb.Table(os.environ["CAPTURE_TABLE"])
-    table.put_item(Item={"id": context.aws_request_id, "payload": json.dumps(event)})
-    return {"statusCode": 200, "body": "ok"}
+    # POST the received JiraTicketData to the test-process HTTP capture server
+    # so the test can assert on the exact payload without any DynamoDB dependency.
+    capture_url = os.environ.get("JIRA_CAPTURE_URL", "")
+    if capture_url:
+        data = json.dumps(event).encode()
+        req = urllib.request.Request(
+            capture_url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=5)
+    return {"statusCode": 200, "body": json.dumps({"issue_key": "TEST-1"})}
 '''
 
 
 @pytest.fixture(scope="session")
-def jira_capture_table(localstack_client):
-    """DynamoDB table used by the stub Jira Lambda to record invocations."""
-    import boto3
+def jira_httpserver():
+    """
+    HTTP server that captures payloads POSTed by the Jira stub Lambda.
 
-    client = localstack_client("dynamodb")
-    resource = boto3.resource("dynamodb", **DUMMY_CREDS)
+    The stub Lambda calls JIRA_CAPTURE_URL (pointing here) with the full
+    JiraTicketData dict it received from the reconciliation Lambda. Tests
+    register an expected handler, invoke reconciliation, then read
+    server.log[-1] to assert on the exact ticket data.
 
-    try:
-        table = resource.Table(JIRA_STUB_TABLE)
-        table.load()
-        return table
-    except client.exceptions.ResourceNotFoundException:
-        pass
+    This avoids all cross-container DynamoDB/CloudWatch issues: the stub
+    just makes a plain HTTP call to host.docker.internal, same mechanism
+    used by the CloudTrail Lake mock on port 9090.
 
-    table = resource.create_table(
-        TableName=JIRA_STUB_TABLE,
-        BillingMode="PAY_PER_REQUEST",
-        KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
-        AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}],
-    )
-    table.wait_until_exists()
-    return table
+    Per-test usage:
+        def test_foo(jira_httpserver, ...):
+            jira_httpserver.clear()
+            jira_httpserver.expect_ordered_request("/").respond_with_json({"ok": True})
+            # ... invoke reconciliation ...
+            request, _ = jira_httpserver.log[-1]
+            ticket = json.loads(request.get_data())
+            assert ticket["project_key"] == "PROJ"
+    """
+    from pytest_httpserver import HTTPServer
+
+    server = HTTPServer(host="0.0.0.0", port=JIRA_HTTPSERVER_PORT)
+    server.start()
+    yield server
+    server.clear()
+    server.stop()
 
 
 @pytest.fixture(scope="session")
-def stub_jira_lambda(localstack_client, jira_capture_table):
+def stub_jira_lambda(localstack_client, jira_httpserver):
     """
-    Deploy the stub Jira Lambda into localstack.
+    Deploy the Jira stub Lambda into localstack.
 
     This is test-only infrastructure - not created by Terraform.
-    The reconciliation Lambda points at JIRA_STUB_FN via its env var
-    (set in terraform.tfvars.localstack as jira_connector_function_name).
+    The stub receives JiraTicketData from the reconciliation Lambda, POSTs it
+    to jira_httpserver so the test can assert on it, then returns a valid
+    issue_key response.
 
-    Tests read from jira_capture_table to assert what the reconciliation
-    Lambda sent to the Jira connector.
+    JIRA_CAPTURE_URL is injected as an env var pointing at jira_httpserver.
+    The URL uses the same host alias (host.docker.internal) that works for the
+    CloudTrail Lake mock, so no extra network configuration is needed.
     """
     lambda_client = localstack_client("lambda")
 
+    # Set Unix 644 permissions on handler.py so the Lambda runtime can read it.
+    # zipfile.writestr with a plain string name defaults to external_attr=0 (no
+    # permissions), which causes PermissionError in localstack's Python runtime.
+    zinfo = zipfile.ZipInfo("handler.py")
+    zinfo.external_attr = 0o644 << 16
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("handler.py", _JIRA_STUB_CODE)
+        zf.writestr(zinfo, _JIRA_STUB_CODE)
     zip_bytes = buf.getvalue()
 
-    env_vars = {
-        "CAPTURE_TABLE": JIRA_STUB_TABLE,
-    }
+    env_vars = {"JIRA_CAPTURE_URL": f"http://{JIRA_HTTPSERVER_HOST}:{JIRA_HTTPSERVER_PORT}"}
 
     try:
         lambda_client.get_function(FunctionName=JIRA_STUB_FN)
         lambda_client.update_function_code(FunctionName=JIRA_STUB_FN, ZipFile=zip_bytes)
+        time.sleep(3)
         lambda_client.update_function_configuration(
             FunctionName=JIRA_STUB_FN,
             Environment={"Variables": env_vars},
         )
+        time.sleep(1)
     except lambda_client.exceptions.ResourceNotFoundException:
         lambda_client.create_function(
             FunctionName=JIRA_STUB_FN,
@@ -203,6 +227,7 @@ def stub_jira_lambda(localstack_client, jira_capture_table):
             Environment={"Variables": env_vars},
             Timeout=10,
         )
+        time.sleep(3)
 
     return JIRA_STUB_FN
 
@@ -267,12 +292,6 @@ def ctl_httpserver(localstack_client):
 def truncate_requests_table(dynamodb_table):
     """Delete all items from the access_requests table before the session."""
     _truncate_table(dynamodb_table, ["request_id", "timestamp"])
-
-
-@pytest.fixture(scope="session", autouse=True)
-def truncate_jira_captures(jira_capture_table):
-    """Delete all items from the jira-captures table before the session."""
-    _truncate_table(jira_capture_table, ["id"])
 
 
 def _truncate_table(table, key_names: list[str]) -> None:

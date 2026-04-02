@@ -4,9 +4,17 @@ import hashlib
 import hmac
 import json
 import time
+import uuid
+from decimal import Decimal
 from urllib.parse import urlencode
 
-from conftest import CTL_FORWARDER_FN, SLACK_HANDLER_FN
+import pytest
+
+from conftest import (
+    CTL_FORWARDER_FN,
+    RECONCILIATION_FN,
+    SLACK_HANDLER_FN,
+)
 
 # ---------------------------------------------------------------------------
 # Phase 0 - infrastructure smoke test
@@ -170,3 +178,171 @@ def test_ctl_forwarder_vault_non_prod_path(localstack_client):
     print(f"\n  [ctl/vault_non_prod] Lambda response: status={result['statusCode']} body={body}")
     assert result["statusCode"] == 200
     assert body["emitted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation Lambda - Cases R1-R4
+# ---------------------------------------------------------------------------
+
+
+def _register_ctl_handlers(ctl_httpserver, s3_rows: list, curated_rows: list) -> None:
+    """Register ordered CloudTrail Lake mock handlers for one reconciliation run.
+
+    The reconciliation Lambda fires exactly four requests in order:
+      1. StartQuery  (S3 store)
+      2. GetQueryResults (S3 store)
+      3. StartQuery  (curated store)
+      4. GetQueryResults (curated store)
+
+    We register plain ordered handlers without header constraints because
+    werkzeug may normalize header case differently than boto3 sends them,
+    making exact header matching unreliable in this Lambda+Docker setup.
+    """
+    # QueryId must be ≥36 chars (UUID) to pass boto3 CloudTrail client validation.
+    _UUID_S3 = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
+    _UUID_CTL = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
+
+    ctl_httpserver.clear()
+    for query_id, rows in ((_UUID_S3, s3_rows), (_UUID_CTL, curated_rows)):
+        ctl_httpserver.expect_ordered_request("/").respond_with_json({"QueryId": query_id})
+        ctl_httpserver.expect_ordered_request("/").respond_with_json(
+            {"QueryStatus": "FINISHED", "QueryResultRows": rows, "QueryStatistics": {}}
+        )
+
+
+def _invoke_reconciliation(localstack_client, window_start: str, window_end: str) -> dict:
+    """Invoke the reconciliation Lambda with an explicit UTC time window."""
+    lam = localstack_client("lambda")
+    resp = lam.invoke(
+        FunctionName=RECONCILIATION_FN,
+        InvocationType="RequestResponse",
+        Payload=json.dumps({"start": window_start, "end": window_end}),
+    )
+    if "FunctionError" in resp:
+        payload = json.loads(resp["Payload"].read())
+        pytest.fail(f"Reconciliation Lambda raised: {payload}")
+    return json.loads(resp["Payload"].read())
+
+
+def _s3_row(event_time: str, request_id: str = "req-test") -> list:
+    """Build a CloudTrail Lake S3 query result row for alice@example.com.
+
+    Column order matches the SELECT list in DailyReconciliationService._build_s3_query.
+    """
+    return [
+        {"eventTime": event_time},
+        {"eventName": "GetObject"},
+        {"eventSource": "s3.amazonaws.com"},
+        {"awsRegion": "eu-central-1"},
+        {"sourceIpAddress": "203.0.113.5"},
+        {"userAgent": "aws-sdk-python"},
+        {"userIdentityType": "AssumedRole"},
+        {"principalId": "AROAEXAMPLE:alice@example.com"},
+        {"userIdentityArn": "arn:aws:sts::123456789012:assumed-role/SSORole/alice@example.com"},
+        {"sessionIssuerUserName": "AWSReservedSSO_AdministratorAccess"},
+        {"recipientAccountId": "123456789012"},
+        {"requestID": request_id},
+        {"reqBucketName": "example-data-bucket"},
+        {"reqObjectKey": "customer/data.csv"},
+    ]
+
+
+_DB_CONNECT_ROW = [
+    {"eventTime": "2024-01-13 10:30:00"},
+    {"eventName": "DbSessionConnect"},
+    {"auth_display_name": None},
+    {"db_username": "app_user"},
+    {"database": "example_prod_db"},
+    {"path": None},
+    {"lease_id": None},
+    {"sourceIpAddress": "10.0.0.1"},
+    {"userAgent": "psql"},
+]
+
+
+def test_reconciliation_no_violations(localstack_client, ctl_httpserver, ssm_params):
+    """Both stores return no events: report has 0 violations and no Jira calls."""
+    _register_ctl_handlers(ctl_httpserver, s3_rows=[], curated_rows=[])
+    report = _invoke_reconciliation(localstack_client, "2024-01-10T00:00:00Z", "2024-01-10T23:59:59Z")
+    summary = report["execution_summary"]
+    print(f"\n  [recon/no_violations] summary: {summary}")
+    assert summary["total_violations_found"] == 0
+
+
+def test_reconciliation_s3_unauthorized_access(
+    localstack_client, ctl_httpserver, ssm_params, stub_jira_lambda, jira_httpserver
+):
+    """S3 GetObject by alice with no approved request → 1 human violation → Jira ticket."""
+    jira_httpserver.clear()
+    jira_httpserver.expect_ordered_request("/").respond_with_json({"ok": True})
+    _register_ctl_handlers(ctl_httpserver, s3_rows=[_s3_row("2024-01-11 10:30:00", "req-r2")], curated_rows=[])
+    report = _invoke_reconciliation(localstack_client, "2024-01-11T00:00:00Z", "2024-01-11T23:59:59Z")
+    summary = report["execution_summary"]
+    actor_counts = report["violations_by_actor_type"]
+    human_violations = report["violations_grouped"]["human_violations"]
+    print(f"\n  [recon/s3_unauth] summary: {summary}")
+    print(f"  [recon/s3_unauth] actor_counts: {actor_counts}")
+    assert summary["total_violations_found"] == 1
+    assert actor_counts["human_actors"] == 1
+    assert len(human_violations) == 1
+    assert human_violations[0]["user_email"] == "alice@example.com"
+
+    jira_httpserver.check_assertions()
+    request, _ = jira_httpserver.log[-1]
+    ticket = json.loads(request.get_data())
+    print(f"  [recon/s3_unauth] Jira ticket: project={ticket['project_key']} summary={ticket['summary']!r}")
+    assert ticket["project_key"] == "PROJ"
+    assert "alice@example.com" in ticket["summary"]
+
+
+def test_reconciliation_access_within_approved_window(
+    localstack_client, ctl_httpserver, ssm_params, stub_jira_lambda, dynamodb_table
+):
+    """S3 GetObject within alice's 60-min approved window → 0 violations → no Jira ticket."""
+    # Insert an approved request: window 2024-01-12 10:00–11:00 UTC
+    req_item = {
+        "request_id": "test-recon-r3",
+        "timestamp": "2024-01-12T10:00:00Z",
+        "local_date": "2024-01-12",
+        "user_email": "alice@example.com",
+        "user_id": "U12345",
+        "user_name": "alice",
+        "duration_minutes": Decimal("60"),
+        "jira_issue_id": "PROJ-100",
+        "justification": "approved incident response",
+    }
+    dynamodb_table.put_item(Item=req_item)
+
+    # Event at 10:30 — inside the approved window
+    _register_ctl_handlers(ctl_httpserver, s3_rows=[_s3_row("2024-01-12 10:30:00", "req-r3")], curated_rows=[])
+    report = _invoke_reconciliation(localstack_client, "2024-01-12T00:00:00Z", "2024-01-12T23:59:59Z")
+    summary = report["execution_summary"]
+    print(f"\n  [recon/approved_window] summary: {summary}")
+    assert summary["total_violations_found"] == 0
+    assert report["violations_grouped"]["human_violations"] == []
+
+
+def test_reconciliation_db_unauthorized_access(
+    localstack_client, ctl_httpserver, ssm_params, stub_jira_lambda, jira_httpserver
+):
+    """DB connect event with no approved request → 1 non-human violation → Jira ticket."""
+    jira_httpserver.clear()
+    jira_httpserver.expect_ordered_request("/").respond_with_json({"ok": True})
+    _register_ctl_handlers(ctl_httpserver, s3_rows=[], curated_rows=[_DB_CONNECT_ROW])
+    report = _invoke_reconciliation(localstack_client, "2024-01-13T00:00:00Z", "2024-01-13T23:59:59Z")
+    summary = report["execution_summary"]
+    actor_counts = report["violations_by_actor_type"]
+    non_human = report["violations_grouped"]["non_human_violations"]
+    print(f"\n  [recon/db_unauth] summary: {summary}")
+    print(f"  [recon/db_unauth] actor_counts: {actor_counts}")
+    print(f"  [recon/db_unauth] non_human: {non_human}")
+    assert summary["total_violations_found"] == 1
+    assert actor_counts["human_actors"] == 0
+    assert non_human["total_count"] == 1
+
+    jira_httpserver.check_assertions()
+    request, _ = jira_httpserver.log[-1]
+    ticket = json.loads(request.get_data())
+    print(f"  [recon/db_unauth] Jira ticket: project={ticket['project_key']} summary={ticket['summary']!r}")
+    assert ticket["project_key"] == "PROJ"
+    assert "service or unknown actor" in ticket["summary"]
