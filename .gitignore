@@ -35,3 +35,8 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
+cdaa/.DS_Store
+cdaa/tests/venv/
+cdaa/tests/.venv/
+cdaa/tests/__pycache__/
+cdaa/tests/*.pyc

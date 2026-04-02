@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>CDAA Integration Test Architecture</title>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark', flowchart: { curve: 'basis' } });
+</script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f1117; color: #e2e8f0; font-family: system-ui, sans-serif; padding: 28px; }
+  h1 { font-size: 0.9rem; color: #475569; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; margin-bottom: 24px; }
+  h2 { font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 12px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .card { background: #1a1f2e; border: 1px solid #2d3448; border-radius: 8px; padding: 20px; }
+  .card.full { grid-column: 1 / -1; }
+  .mermaid { max-width: 100%; }
+  .note { font-size: 0.78rem; color: #64748b; margin-top: 12px; border-top: 1px solid #2d3448; padding-top: 10px; }
+  code { background: #2d3448; color: #7dd3fc; padding: 1px 5px; border-radius: 3px; font-size: 0.8rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-top: 6px; }
+  th { color: #64748b; text-align: left; padding: 5px 8px; border-bottom: 1px solid #2d3448; font-weight: 500; }
+  td { padding: 5px 8px; border-bottom: 1px solid #1a1f2e; vertical-align: top; }
+  td:first-child { color: #94a3b8; white-space: nowrap; font-weight: 500; }
+  .tag { display: inline-block; font-size: 0.68rem; padding: 1px 6px; border-radius: 9999px; font-weight: 600; }
+  .tf  { background: #1e3a5f; color: #60a5fa; }
+  .fix { background: #1a3a2e; color: #4ade80; }
+  .gap { background: #3a2a10; color: #fbbf24; }
+</style>
+</head>
+<body>
+<h1>CDAA — Integration Test Architecture</h1>
+
+<div class="grid">
+
+  <div class="card full">
+    <h2>Infrastructure layout</h2>
+    <pre class="mermaid">
+flowchart LR
+    subgraph HOST["Test machine"]
+        T(["pytest"])
+        HS(["httpserver\n:9090"])
+    end
+
+    subgraph LS["localstack :4566"]
+        SH["slack-handler\nLambda"]
+        CF["ctl-forwarder\nLambda"]
+        RECON["reconciliation\nLambda"]
+        DDB1[("access-requests\nDynamoDB")]
+        SSM[("SSM params")]
+        JSTUB["jira-stub\nLambda"]
+        DDB2[("jira-captures\nDynamoDB")]
+    end
+
+    T -->|"invoke"| SH
+    T -->|"invoke"| CF
+    T -->|"invoke"| RECON
+    T -->|"read"| DDB1
+    T -->|"read"| DDB2
+
+    SH --> DDB1
+    SH --> SSM
+    CF --> SSM
+    RECON --> DDB1
+    RECON --> SSM
+    RECON -->|"lambda.invoke"| JSTUB
+    RECON -->|"AWS_ENDPOINT_URL_CLOUDTRAIL"| HS
+
+    JSTUB --> DDB2
+    </pre>
+    <div class="note">
+      <span class="tag tf">Terraform</span>&nbsp; slack-handler, ctl-forwarder, reconciliation, access-requests table, SSM params &nbsp;&nbsp;
+      <span class="tag fix">Fixture</span>&nbsp; jira-stub Lambda, jira-captures table
+    </div>
+  </div>
+
+  <div class="card full">
+    <h2>Reconciliation test flow — Cases 6–8</h2>
+    <pre class="mermaid">
+sequenceDiagram
+    participant T as pytest
+    participant HS as httpserver :9090
+    participant RECON as reconciliation Lambda
+    participant DDB1 as access-requests
+    participant JSTUB as jira-stub Lambda
+    participant DDB2 as jira-captures
+
+    T->>DDB1: seed access request rows
+    T->>T: clear jira-captures table
+    T->>HS: register StartQuery response
+    T->>HS: register GetQueryResults response (S3 events)
+    T->>HS: register StartQuery response
+    T->>HS: register GetQueryResults response (curated events)
+
+    T->>RECON: lambda.invoke(event)
+    activate RECON
+    RECON->>DDB1: query(local-date-timestamp-index)
+    DDB1-->>RECON: access requests
+    RECON->>HS: POST / (StartQuery — S3)
+    HS-->>RECON: QueryId
+    RECON->>HS: POST / (GetQueryResults — S3)
+    HS-->>RECON: FINISHED + rows
+    RECON->>HS: POST / (StartQuery — curated)
+    HS-->>RECON: QueryId
+    RECON->>HS: POST / (GetQueryResults — curated)
+    HS-->>RECON: FINISHED + rows
+    RECON->>RECON: analyze violations
+    RECON->>JSTUB: lambda.invoke(violation_payload)
+    JSTUB->>DDB2: put_item
+    RECON-->>T: report
+    deactivate RECON
+
+    T->>DDB2: scan()
+    T->>T: assert violation type + user
+    </pre>
+  </div>
+
+  <div class="card">
+    <h2>What the httpserver intercepts</h2>
+    <table>
+      <thead><tr><th>X-Amz-Target header</th><th>Returns</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>CloudTrail_20131101.StartQuery</code></td>
+          <td><code>{"QueryId": "test-q-001"}</code></td>
+        </tr>
+        <tr>
+          <td><code>CloudTrail_20131101.GetQueryResults</code></td>
+          <td><code>{"QueryStatus":"FINISHED","QueryResultRows":[...], "QueryStatistics":{}}</code></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="note">
+      Two StartQuery + GetQueryResults pairs per reconciliation invocation:
+      one for the S3 native event data store, one for the curated (Vault/DB) store.
+      Register 4 ordered handlers per test case.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>QueryResultRows format</h2>
+    <div class="note" style="margin-top:0; border-top:none; padding-top:0;">
+      Each row is a <strong>list of single-key dicts</strong> — one per column:
+    </div>
+    <pre style="margin-top:10px; background:#0f1117; padding:12px; border-radius:6px; font-size:0.75rem; color:#94a3b8; overflow:auto;">[
+  [
+    {"eventTime":  "2024-01-15 10:30:00"},
+    {"eventName":  "GetObject"},
+    {"eventSource":"s3.amazonaws.com"},
+    {"principalId":"ABCDE:alice@example.com"},
+    {"reqBucketName":"example-data-bucket"},
+    {"reqObjectKey": "customer/data.csv"}
+  ]
+]</pre>
+    <div class="note">
+      The reconciliation Lambda flattens each row into a plain dict keyed by column name.
+      Use <code>principalId</code> with a colon-separated email suffix to simulate human S3 access.
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

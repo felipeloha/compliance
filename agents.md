@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Plan mode
+
+**Always start in plan mode.** Before writing any code, creating any file, or making any change:
+
+1. Read the relevant source files and skills
+2. Present a plan using the CreatePlan tool covering: files to extract, sanitization changes, test strategy, and blog post outline
+3. Wait for explicit confirmation before proceeding
+
+This is non-negotiable. The plan must be reviewed and approved before execution starts.
+
+---
 
 This repository uses a shared `ai-docs/` directory for project knowledge, feature specs, and reusable skills.
 
@@ -41,3 +52,4 @@ Skills are markdown files with YAML frontmatter. The `description` field tells y
 |-------|---------|
 | `write-blog-post` | Writing or drafting any post in `blog-posts/` |
 | `sanitize-module` | Adding or reviewing code in any module folder |
+| `cdaa-integration-tests` | Running or writing CDAA integration tests |
