@@ -68,7 +68,7 @@ variable "cloudtrail_lake_data_event_resource_types" {
 }
 
 variable "cloudtrail_lake_s3_object_arns_prefixes" {
-  description = "Optional list of S3 ARN prefixes to scope data events for AWS::S3::Object (e.g., ['arn:aws:s3:::***REMOVED***-daiswas/']). WARNING: If left empty, CloudTrail Lake may ingest S3 object events for all resources matching the type, which can cause very high costs."
+  description = "Optional list of S3 ARN prefixes to scope data events for AWS::S3::Object (e.g., ['arn:aws:s3:::your-bucket-name/']). WARNING: If left empty, CloudTrail Lake may ingest S3 object events for all resources matching the type, which can cause very high costs."
   type        = list(string)
   default     = []
 }
@@ -96,7 +96,7 @@ variable "customer_data_config" {
 }
 
 variable "customer_data_resources" {
-  description = "JSON string enumerating customer data resources to reconcile. Mirrors customer_data_config. Example: {\"rds_databases\":[\"arn:aws:rds:eu-central-1:ACCOUNT_ID:db:***REMOVED***-prod\"],\"s3_buckets\":[\"arn:aws:s3:::customer-prod-bucket\"]}"
+  description = "JSON string enumerating customer data resources to reconcile. Mirrors customer_data_config. Example: {\"rds_databases\":[\"arn:aws:rds:eu-central-1:ACCOUNT_ID:db:your-db-name\"],\"s3_buckets\":[\"arn:aws:s3:::your-bucket-name\"]}"
   type        = string
   default     = "{}"
 }

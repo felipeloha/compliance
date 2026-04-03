@@ -90,8 +90,8 @@ def parse_postgresql_log(message: str) -> dict | None:
     """Parse PostgreSQL connection/disconnection lines forwarded by RDS.
 
     Updated to handle actual RDS log format:
-    2025-08-29 07:45:01 UTC:10.0.210.137(45986):[unknown]@[unknown]:[3464]:LOG:  connection received: host=10.0.210.137 port=45986
-    2025-08-29 07:45:01 UTC:10.0.210.137(45986):user@database:[3464]:LOG:  connection authorized: user=user database=database
+    2025-08-29 07:45:01 UTC:10.0.0.1(45986):[unknown]@[unknown]:[3464]:LOG:  connection received: host=10.0.0.1 port=45986
+    2025-08-29 07:45:01 UTC:10.0.0.1(45986):user@database:[3464]:LOG:  connection authorized: user=user database=database
     """
     event_time_iso = extract_iso_timestamp(message)
 
