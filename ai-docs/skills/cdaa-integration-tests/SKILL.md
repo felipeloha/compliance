@@ -199,3 +199,5 @@ CloudTrail Lake responses, invoke the Terraform-deployed reconciliation Lambda v
 to verify what the Lambda sent to the Jira connector.
 
 Dependencies are managed via `pyproject.toml` in `cdaa/tests/`. Run `uv sync` to install.
+
+Thats it!
