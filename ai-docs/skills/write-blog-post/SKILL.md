@@ -21,6 +21,9 @@ description: Write a technical blog post for the compliance repo. Use when draft
 5. **Code walkthrough** - key snippets only. Explain the non-obvious decisions, not the syntax.
 6. **Key decisions** - 2-3 trade-offs worth naming. Why this approach, not the obvious one.
 7. **Wrap-up** - 2-3 sentences. What you get out of it. No generic conclusions.
+8. **Footer** - two `---` separators, each on its own block:
+   - First: link to the module README for full configuration reference.
+   - Second: one closing question that invites a technical exchange. Ask about how the reader handles the same problem, not whether they liked the post. Example: "How does your team handle X? Do you gate it upfront, audit it after the fact, or something in between?"
 
 ## Diagrams
 

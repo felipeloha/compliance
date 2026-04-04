@@ -115,3 +115,11 @@ The non-human path matters because Kubernetes service accounts, IAM roles, and A
 ## What you get
 
 The security team works a Jira queue instead of digging through CloudTrail logs. The audit trail is tamper-resistant: CloudTrail Lake records can't be deleted by the team being audited, and DynamoDB items carry a long-retention TTL set independently of the access window. Extending coverage to a new data store means adding a CloudWatch log subscription and a query against the curated event data store — the reconciliation core stays unchanged.
+
+---
+
+For the full configuration reference, Terraform variable descriptions, and SSM secret setup, see the [module README](../cdaa/README.md).
+
+---
+
+How does your team handle production data access accountability? Do you gate it upfront, audit it after the fact, or something in between?

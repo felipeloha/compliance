@@ -85,3 +85,100 @@ Terraform creates placeholder values with `ignore_changes`. Update them in SSM a
 ### Feature flag
 
 - `/<prefix>/jira_reporting_enabled` — defaults to `false`. Set to `true` to enable Jira ticket creation.
+
+## Testing
+
+### Prerequisites
+
+- Docker (Docker Desktop on Mac/Windows, or Docker Engine + bridge gateway IP on Linux)
+- [uv](https://github.com/astral-sh/uv) for Python dependency management
+- AWS CLI (credentials are dummy values for localstack; no real account needed)
+
+### Start localstack
+
+From the `cdaa/` directory:
+
+```bash
+docker compose up -d
+```
+
+Localstack exposes port `4566`. The Lambda executor uses the Docker socket to run Lambda containers in Docker-in-Docker mode, so the socket must be mounted (see `docker-compose.yml`).
+
+### Apply Terraform
+
+```bash
+cd terraform
+terraform init        # first time only
+make apply            # applies against localstack using terraform.tfvars.localstack
+```
+
+`make apply` is scoped with `-target` flags to the resources the tests need: the DynamoDB table, all three Lambdas, the IAM role, and the SSM parameters. CloudTrail Lake and CloudWatch resources are skipped because localstack community does not support them.
+
+### Run integration tests
+
+```bash
+cd tests
+uv run pytest test_integration.py -v
+```
+
+**Linux only:** the `pytest-httpserver` mock servers run on the test host but must be reachable from inside Lambda Docker containers. Set `CTL_HTTPSERVER_HOST` to the Docker bridge gateway before running:
+
+```bash
+export CTL_HTTPSERVER_HOST=$(ip route show default | awk '/default/{print $3}')
+uv run pytest test_integration.py -v
+```
+
+### Run unit tests
+
+Unit tests do not require localstack or any AWS connectivity:
+
+```bash
+cd tests
+uv run pytest unit/ -v
+```
+
+### Mock strategy
+
+```mermaid
+flowchart TB
+    subgraph testhost ["Test host (pytest)"]
+        pytest[pytest]
+        httpserver["pytest-httpserver :9090\nStartQuery / GetQueryResults"]
+    end
+
+    subgraph ls ["Localstack :4566 — real AWS service emulation"]
+        slack_fn[slack-handler Lambda]
+        ctl_fn[ctl-forwarder Lambda]
+        recon_fn[reconciliation Lambda]
+        jira_stub[jira-stub Lambda]
+        ddb[(DynamoDB\naccess_requests)]
+        cap[(DynamoDB\njira-captures)]
+        ssm[SSM params]
+        ctl_ep["CloudTrail endpoint\n(generic, non-fatal)"]
+    end
+
+    pytest -->|InvokeFunction| slack_fn
+    pytest -->|InvokeFunction| ctl_fn
+    pytest -->|InvokeFunction| recon_fn
+    pytest -->|assert| ddb
+    pytest -->|assert| cap
+
+    slack_fn --> ddb
+    slack_fn --> ssm
+    ctl_fn -->|"PutAuditEvents (non-fatal)"| ctl_ep
+    recon_fn -->|"StartQuery / GetQueryResults"| httpserver
+    recon_fn --> ddb
+    recon_fn -->|InvokeFunction| jira_stub
+    jira_stub --> cap
+```
+
+API Gateway and CloudWatch log triggers are not exercised — tests invoke Lambdas directly via `lambda:InvokeFunction`. The real Slack API and real Jira API are never called.
+
+| Component | Approach |
+|---|---|
+| DynamoDB | Real table deployed to localstack |
+| SSM Parameter Store | Real parameters deployed to localstack; fixtures overwrite values for tests |
+| Lambda invocations | Real Lambdas deployed to localstack, invoked via `lambda:InvokeFunction` |
+| CloudTrail `PutAuditEvents` | Localstack's generic CloudTrail endpoint is called; failures are non-fatal (caught by the Lambda's own error handling). Tests assert on invocation success and DynamoDB state, not on CTL write. |
+| CloudTrail Lake queries (`StartQuery` / `GetQueryResults`) | `pytest-httpserver` runs on the test host (port 9090). The reconciliation Lambda's `AWS_ENDPOINT_URL_CLOUDTRAIL` is dynamically set to route boto3 calls to the mock server. |
+| Jira connector | A stub Lambda (`cdaa-test-jira-stub`) is deployed to localstack. It writes each invocation payload to a DynamoDB capture table (`cdaa-test-jira-captures`). Tests read that table to assert what the reconciliation Lambda sent. |
