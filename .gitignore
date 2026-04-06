@@ -42,6 +42,5 @@ cdaa/tests/.venv/
 cdaa/tests/__pycache__/
 cdaa/tests/*.pyc
 cdaa/terraform/build/
-cdaa/terraform/lambda/__pycache__/
-cdaa/terraform/lambda/services/__pycache__/
 cdaa/**/__pycache__/
+compliance-audit/**/__pycache__/
