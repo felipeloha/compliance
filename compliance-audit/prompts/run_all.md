@@ -6,7 +6,7 @@ rather than auditing all families sequentially in a single context window.
 ## Pattern
 
 Open your AI agent and run the following prompt once per family. Each subagent gets its
-own context and produces one result file.
+own context and produces one result file under `audits/{FRAMEWORK}/results/`.
 
 ```
 Audit the {FAMILY} control family for the {FRAMEWORK} framework.
@@ -15,58 +15,51 @@ Replace {FAMILY} with: AM
 Replace {FRAMEWORK} with: c5
 ```
 
-Repeat for each family: AM, HR, IDM, BCM, COM, COS, CRY, DEV, INQ, OIS, OPS, PI, PS, PSS, SIM, SP, SSO
+## Framework-specific runbooks
 
-## Sequence recommendation
+Each framework has its own runbook with the correct family list, suggested sequence,
+and framework-specific paths. Use those instead of this file when running an audit:
 
-Run families that share evidence independently and in parallel.
-Group families that reference each other (e.g., SP-01 is referenced in almost every family)
-and audit SP first so subagents can reference the SP score when noting gaps.
+- C5: `audits/c5/run_all.md`
+- ISO 27001:2022: `audits/iso27001/run_all.md`
 
-Suggested order:
-1. SP (referenced everywhere - audit first)
-2. OIS, COM (governance layer)
-3. AM, HR, IDM (core operational controls)
-4. DEV, OPS, COS, CRY (technical controls)
-5. SIM, BCM (incident/continuity)
-6. PS, SSO (physical and third-party)
-7. INQ, PI, PSS (customer-facing and portability)
+## Adding a new framework
 
-## Before running
+1. **Create the directory structure**
+   ```bash
+   mkdir -p audits/{framework}/reqs audits/{framework}/results
+   touch audits/{framework}/mapping.csv
+   echo "family,control,source_type,link,status,doc_type" > audits/{framework}/mapping.csv
+   ```
 
-Check audit completeness:
+2. **Create `audits/{framework}/families.json`**
+   Map family codes to display names. Two conventions are supported:
+   - **Native codes with hyphens** (e.g. C5: `"AM"`, `"IDM"`): extracted from `externalId` prefix before `-`.
+   - **Dot-notation** (e.g. ISO 27001: `"A.5"`, `"C.6"`): extracted from control name prefix. Use this when the standard organises controls by section number.
 
-```bash
-grep needs_manual_fetch audits/c5/mapping.csv
-```
+   Use `collect_controls.py` to inspect what the API returns before deciding:
+   ```bash
+   python -m integrations.vanta.collect_controls --framework {id}
+   ```
 
-Any rows returned = incomplete evidence for those controls.
-Manual retrieval needed before those controls can be scored (they will appear as N/A).
+3. **Scaffold req files** (optional, edit placeholders afterwards)
+   ```bash
+   python -m integrations.vanta.generate_req --framework {id} --output-dir audits/{framework}/reqs
+   ```
 
-## After running
+4. **Create `audits/{framework}/run_all.md`**
+   Copy an existing runbook and update:
+   - The family list (must match the keys in `families.json` - these are duplicated on purpose for readability, add a comment noting that)
+   - The suggested sequence
+   - The framework ID in the example prompt
+   - The result paths
 
-Results land in `audits/{FRAMEWORK}/results/`:
+5. **Add the framework to this file** under "Framework-specific runbooks" above.
 
-```
-audits/c5/results/
-  am_result.md
-  hr_result.md
-  idm_result.md
-  ...
-```
+## Interpreting scores
 
-Review all result files. Commit them so scores are version-controlled and comparable
-across audit cycles:
-
-```bash
-git add audits/c5/results/
-git commit -m "audit: c5 gap analysis $(date +%Y-%m)"
-```
-
-## Interpreting results
-
-- Scores 8-10: adequately evidenced. Verify recency if dates are missing.
-- Scores 4-7: partial gaps. Prioritize remediation based on control criticality.
-- Scores 0-3: significant gaps. High priority.
+- 8-10: adequately evidenced. Verify recency if dates are missing.
+- 4-7: partial gaps. Prioritize remediation based on control criticality.
+- 0-3: significant gaps. High priority.
 - N/A (needs_manual_fetch): fetch the document, save as `.txt` in `docs/{FAMILY}/`,
   update `mapping.csv` status to `ready`, and re-run the affected family.

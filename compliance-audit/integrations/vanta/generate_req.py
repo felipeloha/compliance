@@ -12,7 +12,9 @@ Run from the compliance-audit directory:
 """
 
 import argparse
+import json
 import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -32,25 +34,36 @@ except ImportError:
 from integrations.utils import extract_family  # noqa: E402
 from integrations.vanta.bootstrap import build_client  # noqa: E402
 
-FAMILY_NAMES: dict[str, str] = {
-    "AM": "Asset Management",
-    "BCM": "Business Continuity Management",
-    "COM": "Compliance",
-    "COS": "Communication Security",
-    "CRY": "Cryptography",
-    "DEV": "Secure Development",
-    "HR": "Human Resources",
-    "IDM": "Identity and Access Management",
-    "INQ": "Investigation Requests",
-    "OIS": "Organizational Information Security",
-    "OPS": "Operations Security",
-    "PI": "Portability and Interoperability",
-    "PS": "Physical Security",
-    "PSS": "Product and Service Security",
-    "SIM": "Security Incident Management",
-    "SP": "Security Policies",
-    "SSO": "Supplier and Service Provider Management",
-}
+
+def resolve_family(control, family_names: dict[str, str]) -> str:
+    """Return the family code for a control.
+
+    If families.json uses dot-notation keys (e.g. "A.5", "C.6") the family is
+    extracted from the control name prefix rather than the externalId, because
+    Vanta's externalId uses its own taxonomy (GOV-92, RSK-36 …) which differs
+    from the standard's native section numbering.
+    """
+    if family_names and any("." in k for k in family_names):
+        m = re.match(r"^([AC]\.\d+)", control.name)
+        if m:
+            return m.group(1)
+        # Control has no standard prefix (e.g. custom controls) - fall back to externalId
+        if control.external_id and "-" in control.external_id:
+            return control.external_id.split("-")[0]
+        return "UNKNOWN"
+    return extract_family(control)
+
+
+def load_family_names(output_dir: Path) -> dict[str, str]:
+    """Load family display names from families.json one level above output_dir.
+
+    Convention: audits/{framework}/reqs/ -> audits/{framework}/families.json
+    Falls back to an empty dict (raw family code is used as display name).
+    """
+    families_file = output_dir.resolve().parent / "families.json"
+    if families_file.exists():
+        return json.loads(families_file.read_text(encoding="utf-8"))
+    return {}
 
 
 def main() -> None:
@@ -77,6 +90,12 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    family_names = load_family_names(output_dir)
+    if family_names:
+        print(f"Loaded {len(family_names)} family names from {output_dir.resolve().parent / 'families.json'}")
+    else:
+        print("No families.json found - family codes will be used as display names")
+
     client = build_client("vanta")
 
     print(f"Fetching controls for framework: {args.framework}")
@@ -86,7 +105,7 @@ def main() -> None:
     # Group controls by family
     by_family: dict[str, list] = defaultdict(list)
     for control in controls:
-        family = extract_family(control)
+        family = resolve_family(control, family_names)
         by_family[family].append(control)
 
     written = 0
@@ -100,7 +119,7 @@ def main() -> None:
             skipped += 1
             continue
 
-        family_name = FAMILY_NAMES.get(family, family)
+        family_name = family_names.get(family, family)
         lines = [f"# {family} - {family_name}", ""]
 
         # Sort controls by external_id, falling back to name

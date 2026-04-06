@@ -1,0 +1,19 @@
+{
+  "AM": "Asset Management",
+  "BCM": "Business Continuity Management",
+  "COM": "Compliance",
+  "COS": "Communication Security",
+  "CRY": "Cryptography",
+  "DEV": "Secure Development",
+  "HR": "Human Resources",
+  "IDM": "Identity and Access Management",
+  "INQ": "Investigation Requests",
+  "OIS": "Organizational Information Security",
+  "OPS": "Operations Security",
+  "PI": "Portability and Interoperability",
+  "PS": "Physical Security",
+  "PSS": "Product and Service Security",
+  "SIM": "Security Incident Management",
+  "SP": "Security Policies",
+  "SSO": "Supplier and Service Provider Management"
+}
