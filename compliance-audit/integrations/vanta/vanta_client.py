@@ -143,6 +143,10 @@ class VantaAPIClient(ComplianceIntegration):
             for d in self._paginate(f"/v1/frameworks/{framework_id}/controls")
         ]
 
+    def list_control_documents(self, control_id: str) -> list[dict[str, Any]]:
+        """Return raw document metadata for a control without downloading files."""
+        return self._paginate(f"/v1/controls/{control_id}/documents")
+
     def get_control_documentation(self, control: Control, docs_dir: Path) -> list[ControlDocumentationRow]:
         """Fetch all Vanta documents for a control and materialise them locally.
 

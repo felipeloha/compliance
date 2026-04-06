@@ -1,0 +1,5 @@
+family,control,source_type,link,status,doc_type
+AM,,local_file,samples/am-policy.md,ready,documentation
+HR,,local_file,samples/hr-policy.md,ready,documentation
+IDM,,local_file,samples/idm-policy.md,ready,documentation
+IDM,IDM-06,external_url,https://example.com/pam-solution-overview,needs_manual_fetch,documentation
