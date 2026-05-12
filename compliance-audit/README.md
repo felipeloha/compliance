@@ -56,6 +56,11 @@ uv sync --group dev
 # Results land in audits/c5/results/am_result.md
 ```
 
+Or, use the interactive workflow prompt:
+- `prompts/interactive.md`
+
+This prompt will ask which framework and family to audit, then generate the final audit instruction automatically.
+
 Check mapping completeness before auditing:
 
 ```bash

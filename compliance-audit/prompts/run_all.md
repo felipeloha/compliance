@@ -8,6 +8,9 @@ rather than auditing all families sequentially in a single context window.
 Open your AI agent and run the following prompt once per family. Each subagent gets its
 own context and produces one result file under `audits/{FRAMEWORK}/results/`.
 
+If you want the model to ask for the framework and family interactively, use
+`prompts/interactive.md` instead of a one-shot prompt.
+
 ```
 Audit the {FAMILY} control family for the {FRAMEWORK} framework.
 Follow the instructions in: prompts/template.md
