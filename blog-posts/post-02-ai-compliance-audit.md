@@ -1,4 +1,4 @@
-# We ran our ISO 27001 gap analysis with an AI agent. Here's the prompt pipeline.
+# How I automated a C5/ISO 27001 compliance audit with an AI agent
 
 Annual compliance audits are a known pain. 80+ controls, 200+ individual requirements,
 policy documents scattered across a compliance tool, a wiki, and vendor portals. The
@@ -7,21 +7,22 @@ closes the tab.
 
 ## The challenge
 
-Our C5/ISO 27001 gap analysis covers 17 control families. For each control, an auditor
-needs to locate the relevant policy document, read it, verify it covers the requirement,
-and decide whether the evidence is current enough to count. At 1-2 engineers and several
-weeks of wall time, it is one of the highest-cost recurring security activities we run.
+A single framework audit — C5 alone covers 17 control families — requires an auditor
+to locate the relevant documents and evidence for each control, read them, verify they
+cover the requirements, and decide whether the evidence is current enough to count.
+At 1-2 engineers and several weeks of wall time, it was one of the highest-cost
+recurring security activities on the team's calendar.
 
-The two failure modes we kept hitting:
+The two failure modes I kept running into:
 
 1. **Evidence discovery** - knowing which documents cover which controls is manual institutional knowledge.
-   Documents live in Vanta, Confluence, vendor portals, and shared drives. Finding them per-control takes the majority of the time.
+   Documents live in Vanta, Confluence, vendor portals, and/or shared drives. Finding them per-control takes the majority of the time.
 
 2. **Staleness** - a document can be technically linked to a control in Vanta while being three years old and not actually covering the current requirement text. The tooling doesn't catch this.
 
 ## The approach
 
-We built a three-phase pipeline: download first, audit second, review third.
+I built a three-phase pipeline: download first, audit second, review third.
 
 Phase 1 is automation: a `bootstrap.py` script pulls all evidence from Vanta through
 the API, converts PDFs and Word documents to plain text, and writes a `mapping.csv`
@@ -155,7 +156,7 @@ an edge case.
 ## Key decisions
 
 **Download first, not live during audit.** The alternative is having the AI call the
-Vanta MCP tool per control during the audit. We chose download-first because: (1) it
+Vanta MCP tool per control during the audit. I went with download-first because: (1) it
 decouples audit runtime from API availability; (2) it creates a local snapshot for
 comparing evidence state across audit cycles; (3) it makes the prompt deterministic -
 the agent reads a known set of files rather than discovering evidence on the fly.

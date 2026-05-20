@@ -2,7 +2,7 @@
 
 > Blog post: [blog-posts/post-02-ai-compliance-audit.md](../blog-posts/post-02-ai-compliance-audit.md)
 
-We ran our ISO 27001 gap analysis with an AI agent. Here's the prompt pipeline.
+I built this to run ISO 27001 gap analyses with an AI agent. Here's the prompt pipeline.
 
 ## Overview
 
