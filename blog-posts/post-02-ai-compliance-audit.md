@@ -1,9 +1,14 @@
-# How I automated a C5/ISO 27001 compliance audit with an AI agent
+# How I automated a (C5/ISO 27001) compliance audit with an AI agent
 
 Annual compliance audits are a known pain. 80+ controls, 200+ individual requirements,
 policy documents scattered across a compliance tool, a wiki, and vendor portals. The
 output is a spreadsheet with scores that are already stale by the time the auditor
 closes the tab.
+
+I built an agent that runs the whole gap analysis in minutes. Once the evidence is
+indexed locally, the audit is a prompt — you can remediate a control, update the
+document, and re-run without touching anything else. No re-reading the full framework.
+No spreadsheet rebuild. Just the delta.
 
 ## The challenge
 
@@ -16,34 +21,24 @@ recurring security activities on the team's calendar.
 The two failure modes I kept running into:
 
 1. **Evidence discovery** - knowing which documents cover which controls is manual institutional knowledge.
-   Documents live in Vanta, Confluence, vendor portals, and/or shared drives. Finding them per-control takes the majority of the time.
+   Documents live in Vanta, Confluence, vendor portals, and shared drives. Finding them per-control takes the majority of the time.
 
 2. **Staleness** - a document can be technically linked to a control in Vanta while being three years old and not actually covering the current requirement text. The tooling doesn't catch this.
 
 ## The approach
 
-I built a three-phase pipeline: download first, audit second, review third.
+The pipeline has one hard requirement: evidence must be available as local text files. Everything else follows from that.
 
-Phase 1 is automation: a `bootstrap.py` script pulls all evidence from Vanta through
-the API, converts PDFs and Word documents to plain text, and writes a `mapping.csv`
-that indexes every piece of evidence with a `status` column (`ready` or `needs_manual_fetch`).
+Downloading everything locally solves the discovery problem once — the mapping index tells the agent exactly which files cover which controls. The content-tier scoring catches staleness regardless of what the CSV says, because the agent reads the document and classifies it, not just checks that it exists.
 
-Phase 2 is prompt-driven: a single `template.md` prompt instructs an AI agent to read
-the control checklist for a family, load the mapped evidence, and produce a scored gap
-table. The agent runs per family, in parallel if needed.
-
-Phase 3 is human: a security engineer reviews the AI-scored table, validates borderline
-scores, and commits the result. Committed results diff cleanly across audit cycles.
-
-The key constraint: the AI only scores what it can read. If evidence is not locally
-available, the control gets `N/A` - not a guess, not a 0. This makes gaps explicit
-rather than hidden in optimistic defaults.
+Three phases: collect evidence first, audit second, review third. The AI only scores what it can read. If a file isn't locally available, the control gets `N/A` — not a guess, not a 0. This makes gaps explicit rather than hidden in optimistic defaults.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph bootstrap ["Phase 1: bootstrap.py"]
+    subgraph evidence ["Phase 1: evidence collection"]
+        Manual["Manual .txt files"] --> DocsFolder
         VantaAPI["Vanta API\n/controls\n/documents\n/uploads"] --> Downloader["Download\nPDF / Word"]
         Downloader --> Converter["Convert\nto .txt"]
         Converter --> DocsFolder["docs/FAMILY/\n*.txt"]
@@ -69,7 +64,9 @@ flowchart LR
 
 ### The mapping.csv
 
-The central artifact is a two-level evidence index:
+The central artifact is a two-level evidence index. Every piece of evidence gets a row:
+what family it belongs to, which specific control it covers (or blank for family-wide),
+where the file lives, and whether it's locally available:
 
 ```
 family,control,source_type,link,status,doc_type
@@ -94,72 +91,63 @@ Before every audit run, one grep tells you exactly where you have gaps in covera
 grep needs_manual_fetch audits/c5/mapping.csv
 ```
 
-### The VantaAPIClient
-
-The bootstrap talks to three Vanta endpoints per control: list documents, list uploaded
-files per document, download the file. Rate limiting and cursor pagination are handled
-transparently:
-
-```python
-def _paginate(self, endpoint: str) -> list[dict[str, Any]]:
-    results = []
-    cursor = None
-    while True:
-        params = {"pageSize": 100}
-        if cursor:
-            params["pageCursor"] = cursor
-        data = self.make_api_request(endpoint, params)
-        if "error" in data:
-            break
-        page_results = data.get("results", {})
-        results.extend(page_results.get("data", []))
-        page_info = page_results.get("pageInfo", {})
-        if not page_info.get("hasNextPage", False):
-            break
-        cursor = page_info.get("endCursor")
-    return results
-```
-
-PDF extraction uses `pypdf`. Word documents are recorded as `needs_manual_fetch` with
-a placeholder, since reliable `.docx` to plain text conversion requires a dependency
-heavier than the rest of the tool. That tradeoff is explicit in the code and surfaced
-in `mapping.csv`.
-
 ### The prompt template
 
 The audit prompt is a single Markdown file. The key design choice is that the **control
 checklist is the ground truth**, not the evidence index. The agent must produce one row
-per control in the req file, even if there is zero evidence:
+per control in the req file, even if there is zero evidence.
 
-```
-For each control in the checklist:
-1. Identify all relevant evidence rows from mapping.csv (family + control-specific).
-2. Read the content of available evidence files.
-3. Assess whether the evidence directly addresses the control requirement.
-4. Score 0-10. Document gaps.
-5. Assess evidence sufficiency: Yes / Partial / No / Incomplete.
-```
+Before scoring, the agent classifies each document into one of three content tiers by
+reading it — not by trusting the `doc_type` field in the CSV:
 
-The output table has five columns:
+| Content tier | What it looks like |
+|---|---|
+| **Policy** | States intent or commitments ("assets must be…", "the organisation shall…") |
+| **Procedure / Standard** | Defines *how*: steps, configuration parameters, checklists |
+| **Operational evidence** | Proves the control is *currently operating*: inventory exports, log excerpts, audit reports, dated test results |
 
-| Control | Evidence sources | Evidence sufficient? | Score (0-10) | Gaps |
-|---------|-----------------|---------------------|--------------|------|
-| AM-01 | information-security-policy.txt | Yes - current (2024) | 9/10 | Minor: no automated change logging |
-| AM-04 | (needs_manual_fetch) | Incomplete | N/A | Fetch manually and re-run |
-| AM-06 | (no evidence) | No | 0/10 | Link policy docs to this control in Vanta |
+The tier determines the scoring ceiling:
 
-The "Evidence sufficient?" column forces the AI to reason about currency and completeness
-separately from scoring. A document can exist and score 4/10 because it is outdated,
-or score 8/10 for a specific control while being `Partial` because it doesn't cover
-an edge case.
+- Only policy-level content present → cap at 4/10
+- Procedure/standard content but no operational evidence → cap at 6/10
+- Operational evidence present → eligible for 7–10
+
+A well-written policy that covers every requirement word-for-word is still capped at
+4/10. Policy text states intent, not operational reality.
+
+The output table has six columns:
+
+| Control | Evidence sources | Content assessed as | Evidence sufficient? | Score (0-10) | Gaps |
+|---------|-----------------|---------------------|---------------------|--------------|------|
+| AM-01 | policy.md, inventory-export.csv | Operational evidence | Yes - current (2024) | 9/10 | Minor: no automated audit trail |
+| AM-02 | policy.md, procedure.md | Procedure | Partial - no operational evidence | 6/10 | No operational evidence — implementation effectiveness unproven |
+| AM-03 | policy.md | Policy only | No - intent stated, nothing more | 4/10 | No operational evidence — implementation effectiveness unproven |
+| AM-04 | (needs_manual_fetch) | Unknown | Incomplete | N/A | Fetch manually and re-run |
+| AM-06 | (no evidence) | None | No | 0/10 | Link evidence to this control |
+
+The "Content assessed as" column separates what the document actually contains from what
+the CSV claims it is. Any mismatch gets flagged in Gaps so the mapping can be corrected.
+
+### Populating evidence from Vanta
+
+The `mapping.csv` can be built manually — drop `.txt` files into `docs/{FAMILY}/` and
+add rows. For teams with evidence already organized in Vanta, I wrote a `bootstrap.py`
+script that automates it: it pulls all controls and linked documents from the Vanta API,
+converts PDFs to plain text, and writes the mapping index in one pass.
+
+Files that can't be downloaded — Confluence pages, external URLs, Word documents — are
+recorded as `needs_manual_fetch` rather than skipped. The bootstrap knows they exist and
+where to find them; it just can't read them programmatically. Fetching those manually
+and flipping the status to `ready` is the last step before a complete audit run.
 
 ## Key decisions
 
-**Download first, not live during audit.** The alternative is having the AI call the
-Vanta MCP tool per control during the audit. I went with download-first because: (1) it
-decouples audit runtime from API availability; (2) it creates a local snapshot for
-comparing evidence state across audit cycles; (3) it makes the prompt deterministic -
-the agent reads a known set of files rather than discovering evidence on the fly.
+**Local files first, integrations second.** The pipeline has no runtime dependency on
+Vanta, Confluence, or any external API. Evidence is downloaded once, stored locally,
+and the audit runs against that snapshot. This decouples audit runtime from API
+availability, creates a local record for comparing evidence state across cycles, and
+makes the prompt deterministic — the agent reads a known set of files rather than
+discovering evidence on the fly.
 
 **`needs_manual_fetch` blocks scoring, not silently ignored.** An early version of the
 prompt gave scores of 0 for URL-only controls. The problem: 0/10 looks the same as
@@ -175,11 +163,25 @@ than building from scratch in a few weeks.
 
 ## What you get out of it
 
-A structured, committed gap analysis that you can diff. The first run surfaces evidence
-gaps you didn't know you had (controls with zero documents linked in Vanta, URL-only
-evidence for critical controls). Subsequent runs show what improved, what regressed,
-and what was never remediated. The prompt pipeline stays the same; the evidence and
-scores evolve with your security posture.
+The most immediate win is speed. What used to take 1-2 engineers several weeks now
+runs in minutes. The agent reads every document, classifies it, and scores every control
+while you're doing something else. The human review that follows is hours, not weeks —
+focused on borderline scores and missing evidence rather than reading policy docs from
+scratch.
+
+The second win is re-runnability. Fix a gap, update the document, run the affected
+family again. The rest of the scores stay untouched. You don't re-read the full
+framework every time something changes — you only look at the delta.
+
+The first full run is usually surprising. Controls you assumed were covered turn out to
+have only a policy linked — no procedure, no operational evidence — and score 4/10
+instead of the 8 someone had in the spreadsheet. Controls with URL-only evidence show
+up as `N/A` rather than silently passing. You see the actual state of your posture,
+not the optimistic version that lives in the compliance tool.
+
+After that, the value compounds. Results are committed to git, so every subsequent cycle
+shows exactly what improved, what regressed, and what was flagged months ago and never
+remediated. The prompt stays the same; the evidence and scores evolve with your posture.
 
 ---
 
