@@ -143,6 +143,25 @@ python -m integrations.vanta.collect_controls \
   --output-json controls.json
 ```
 
+## MCP integrations
+
+If your AI agent has Confluence or Google Drive MCP tools configured, it can resolve
+`needs_manual_fetch` documents automatically during the audit — no manual download step
+required for those sources.
+
+| `source_type` in mapping.csv | How it gets resolved |
+|------------------------------|----------------------|
+| `local_file` | Read directly from `docs/{FAMILY}/` |
+| `confluence` | Fetched by the agent via Confluence MCP (`getConfluencePage`) |
+| `google_drive` | Fetched by the agent via Google Drive MCP |
+| `external_url` | Manual retrieval still required |
+
+The agent attempts MCP fetches at audit time and scores the control normally if content
+is returned. Controls that still can't be resolved stay `N/A`.
+
+To use this: add your Confluence or Google Drive MCP to your agent's configuration,
+then run the audit as normal. No changes to `mapping.csv` or the bootstrap step needed.
+
 ## Tests
 
 ```bash

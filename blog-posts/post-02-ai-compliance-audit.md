@@ -137,8 +137,14 @@ converts PDFs to plain text, and writes the mapping index in one pass.
 
 Files that can't be downloaded — Confluence pages, external URLs, Word documents — are
 recorded as `needs_manual_fetch` rather than skipped. The bootstrap knows they exist and
-where to find them; it just can't read them programmatically. Fetching those manually
-and flipping the status to `ready` is the last step before a complete audit run.
+where to find them; it just can't read them programmatically.
+
+For Confluence and Google Drive sources, there's a better path than manual download: if
+your AI agent has the Confluence or Google Drive MCP configured, it fetches those
+documents itself during the audit. The `source_type` field in the mapping tells the agent
+which tool to call. Controls that were `N/A` because content wasn't local get scored
+automatically — no extra step, no manual intervention. External URLs without an MCP
+still require a manual fetch, but those are typically the minority.
 
 ## Key decisions
 

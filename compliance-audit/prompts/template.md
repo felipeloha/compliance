@@ -25,8 +25,13 @@ control family **{FAMILY}**.
 
 3. **Evidence files**: For each row with `status = ready` and `source_type = local_file`,
    read the file at the path in the `link` column.
-   For `source_type = confluence`, use your `getConfluencePage` tool if available.
+   For `source_type = confluence`, use your Confluence MCP `getConfluencePage` tool if available.
+   For `source_type = google_drive`, use your Google Drive MCP tool to fetch the file by the ID or URL in the `link` column.
    For `source_type = external_url`, note that manual retrieval is required.
+
+   If an MCP tool is available for a `needs_manual_fetch` row, attempt to fetch the content
+   and treat it as `ready` for scoring purposes. Note in the Gaps column that the content
+   was fetched via MCP rather than downloaded locally.
 
 4. **Evidence tiers**: The `doc_type` field is a starting signal, not ground truth. Use it as a hint,
    but always determine the actual content tier by reading the document:
