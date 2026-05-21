@@ -8,37 +8,55 @@ Slack modal -> DynamoDB -> CloudTrail Lake SQL -> Jira violation tickets. No thi
 
 ---
 
-## The compliance gap
+## The problem
 
-C5 IDM-07 requires that every access to production customer data is authorized, justified, and traceable to a person. In practice this means three things: developers need a structured way to declare intent before touching production, the system needs to record what was actually accessed, and anything that doesn't match needs to surface automatically for the security team.
+Your auditor asks: who accessed this customer record on March 14th, and why?
 
-Without a structured process, developers access S3 buckets and databases for legitimate reasons — debugging, support, incident response — but no audit trail links the access to a reason or a time boundary. Manual CloudTrail log reviews are expensive and leave gaps.
+You open CloudTrail. You see an IAM role. You see a timestamp. You have no idea which person was behind it, no idea what they were trying to fix, and no ticket to point to. The access was almost certainly legitimate — a developer debugging a support escalation — but you can't prove it. That's a finding.
 
-The real challenge is the tension at the center: if you block access until it's approved, you slow down incident response. If you just log everything, the security team drowns in noise. The useful middle ground is frictionless declaration of intent combined with automated post-hoc detection of anything that didn't match.
+This is one of the most common gaps in production access controls, and it cuts across every major compliance framework:
+
+| Framework | Control |
+|---|---|
+| SOC 2 | CC6.1, CC6.2 — logical access controls |
+| ISO 27001:2022 | A.8.2, A.8.3 — privileged access management |
+| GDPR | Art. 32 (technical measures) + Art. 30 (records of processing) |
+| HIPAA | § 164.312(b) — audit controls |
+| PCI DSS | Req. 10 — log and monitor all access to system components |
+| NIST 800-53 / FedRAMP | AU-2, AU-3, AU-12 — audit events |
+| BSI C5 | IDM-07 — authorization and traceability |
+
+Every one of those has the same underlying requirement: access to production data must be authorized, justified, and traceable to a person. Most teams don't have a structured way to satisfy it.
+
+## The real tension
+
+The standard answer is "approve before access" — block the developer until someone clicks approve. Tools like Bytebase and Hoop.dev work this way.
+
+The problem is that blocking is exactly the wrong behavior during an incident. The moment production is on fire and a developer needs to understand what's happening is precisely when a gated approval queue creates the most damage.
+
+The useful middle ground is **frictionless declaration of intent + automated post-hoc detection**. The developer declares what they're about to do, accesses production, and the system catches anything that didn't match the next morning. No blocking. No slow path for incident response. Full audit trail. And critically: the system doesn't reward retroactive justification — if you access production first and file the Slack request after, that's still a violation.
 
 ## Approach
 
 Three Lambdas, each owning a separate slice of the lifecycle. One handles the Slack modal and writes the approved access window to DynamoDB. One subscribes to CloudWatch log groups (RDS PostgreSQL, Vault audit) and forwards events to CloudTrail Lake. One runs nightly, queries CloudTrail Lake with SQL, correlates every event against DynamoDB windows, and creates Jira tickets for violations.
 
-No approval step. No access blocking. The developer declares intent, accesses production, and the system catches anything outside the declared window the next morning.
-
-The shape — trust now, audit later — is a deliberate trade-off against the "approve before access" pattern that most compliance tooling defaults to. More on that in the key decisions section.
+The shape — trust now, audit later — is deliberate. More on the trade-offs in the key decisions section.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     Dev[Developer] -->|/request-customer-data-access| Slack
-    Slack --> Handler[slack-access-request-handler]
+    Slack --> Handler["slack-access-request-handler\n(declares intent → DynamoDB)"]
     Handler -->|users.info| Slack
     Handler -->|put_item| DDB[(DynamoDB\naccess windows)]
 
-    RDS[RDS CloudWatch logs] --> Forwarder[audit-log-ctl-forwarder]
+    RDS[RDS CloudWatch logs] --> Forwarder["audit-log-ctl-forwarder\n(captures what happened → CloudTrail Lake)"]
     Vault[Vault audit logs] --> Forwarder
     Forwarder -->|PutAuditEvents| CTL[(CloudTrail Lake)]
     S3[S3 object-level EDS] --> CTL
 
-    Cron[cron 03:00 UTC] --> Recon[daily-reconciliation]
+    Cron[cron 03:00 UTC] --> Recon["daily-reconciliation\n(finds the gaps → Jira)"]
     CTL --> Recon
     DDB --> Recon
     Recon -->|create ticket per violation| Jira
@@ -55,7 +73,7 @@ item = {
     "duration_minutes": minutes,
     "request_timestamp": now_iso,       # when the request was submitted
     "expiry_timestamp": expiry_iso,     # request_timestamp + duration_minutes
-    "ttl": retention_ttl_epoch,         # 7-year C5 retention, not the access window
+    "ttl": retention_ttl_epoch,         # 7-year retention period, not the access window
 }
 ```
 
@@ -81,7 +99,7 @@ Each event is correlated against DynamoDB windows using email as the primary key
 
 ## The nuance most approval tools miss
 
-Standard "approve before access" tools — Bytebase, Hoop.dev, and others — prevent unapproved access by blocking it. CDAA doesn't block anything, which means it has to handle a case those tools never see: the developer who accesses production first, then files the Slack request retroactively.
+Because CDAA doesn't block access, it has to handle a case that gating tools never see: the developer who accesses production first, then files the Slack request retroactively.
 
 The window check is three lines:
 
@@ -104,11 +122,17 @@ The full violation taxonomy:
 
 The non-human path matters because Kubernetes service accounts, IAM roles, and AWS-managed services access the same S3 buckets. Known service actors are whitelisted by category (`SERVICE_PRINCIPAL`, `SERVICE_ACCOUNT`, `AWS_SERVICE`) and suppressed. Remaining unrecognized automated access is reported in a separate non-human group so it can be reviewed and either whitelisted or investigated without polluting the human violation queue.
 
+## What a violation actually looks like
+
+The first week the system ran, it surfaced three `ACCESS_OUTSIDE_WINDOW` tickets. Two were the same engineer accessing an S3 bucket twelve minutes after their declared window expired — they had extended the debugging session without filing a second request. One was a developer who had filed the Slack request thirty seconds *after* accessing the database, probably out of habit from older workflows.
+
+None of those were malicious. All three were real compliance gaps. In the old world, none would have been caught. The engineer got a Jira ticket assigned to them, added a comment explaining what happened, and closed it. The audit trail now shows the access, the gap, and the resolution — which is exactly what an auditor wants to see.
+
 ## Key decisions
 
 **No approval gate.** Blocking access until a request is approved would slow down incident response — exactly when developers most need quick access to understand what's happening in production. The accountability layer (a Jira ticket assigned to you if you access without a valid window) creates the right incentive without blocking legitimate emergency access.
 
-**Daily reconciliation, not real-time.** CloudTrail Lake queries are pay-per-byte-scanned. A nightly batch over a full day of events is significantly cheaper than streaming correlation. C5 doesn't require real-time detection; the compliance evidence just needs to exist and be auditable. A one-day lag is acceptable and the batch approach is far simpler to operate.
+**Daily reconciliation, not real-time.** CloudTrail Lake queries are pay-per-byte-scanned. A nightly batch over a full day of events is significantly cheaper than streaming correlation. The frameworks listed above don't require real-time detection; the compliance evidence just needs to exist and be auditable. A one-day lag is acceptable and the batch approach is far simpler to operate.
 
 **Email as the correlation key.** CloudTrail uses IAM identities. DynamoDB stores the email resolved from Slack at request time. Bridging those two requires extracting email from SSO session names, stripping Vault OIDC prefixes from `auth_display_name`, and falling back to IAM user `owner` tags for programmatic users. It's the most fragile coupling in the system, but it's also what makes the correlation reliable across S3, RDS, and Vault access paths without requiring a separate identity mapping service.
 
