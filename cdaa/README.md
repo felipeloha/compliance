@@ -49,6 +49,30 @@ Three event-driven Lambda functions own separate slices of the lifecycle:
 
 **`daily-reconciliation`** — runs on a cron (default 03:00 UTC). Queries CloudTrail Lake for the previous day's S3 object-level events (native EDS) and database/Vault events (curated EDS). Correlates each event against DynamoDB access windows using email as the primary correlation key. Classifies actors, applies whitelists, generates a structured JSON report, and creates Jira tickets per violation via a configurable connector Lambda.
 
+S3 query template:
+
+```sql
+SELECT eventTime, eventName,
+       userIdentity.principalId AS principalId,
+       element_at(requestParameters, 'bucketName') AS reqBucketName,
+       element_at(requestParameters, 'key')        AS reqObjectKey
+FROM {event_data_store_id}
+WHERE eventTime >= TIMESTAMP '{date} 00:00:00'
+  AND eventTime <= TIMESTAMP '{date} 23:59:59'
+  AND eventSource = 's3.amazonaws.com'
+  AND eventName IN ('GetObject', 'PutObject', 'DeleteObject', 'RestoreObject')
+```
+
+Window check logic:
+
+```python
+request_start_epoch = parse_time_to_epoch(req["timestamp"])
+request_end_epoch = request_start_epoch + 60 * int(req["duration_minutes"])
+access_within_window = request_start_epoch <= event_epoch <= request_end_epoch
+```
+
+An event before `request_start_epoch` fails the left-side bound and is classified as `ACCESS_OUTSIDE_WINDOW`, the same as an event after `request_end_epoch`. Retroactive requests are not rewarded.
+
 ## Configuration
 
 ### Required

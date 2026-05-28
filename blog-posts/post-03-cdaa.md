@@ -1,10 +1,6 @@
 # Proving Every Production Data Access Was Justified
 
-Slack modal -> DynamoDB -> CloudTrail Lake SQL -> Jira violation tickets. No third-party tool.
-
-**Series**: Compliance without the theater (flagship)
-
-**Module**: [cdaa/](../cdaa/)
+How to build a complete production data access audit trail — without blocking developers or buying a third-party tool.
 
 ---
 
@@ -38,9 +34,13 @@ The useful middle ground is **frictionless declaration of intent + automated pos
 
 ## Approach
 
-Three Lambdas, each owning a separate slice of the lifecycle. One handles the Slack modal and writes the approved access window to DynamoDB. One subscribes to CloudWatch log groups (RDS PostgreSQL, Vault audit) and forwards events to CloudTrail Lake. One runs nightly, queries CloudTrail Lake with SQL, correlates every event against DynamoDB windows, and creates Jira tickets for violations.
+The system has three jobs: collect justifications, collect evidence, and reconcile the two — surfacing anything that doesn't match as a violation.
 
-The shape — trust now, audit later — is deliberate. More on the trade-offs in the key decisions section.
+When a developer is about to touch production data, they file a Slack request — what they're doing, why, and for how long. That justification gets stored. Nothing is approved or blocked; the access happens regardless. In parallel, every data access across S3, RDS, and Vault is continuously captured into a central audit log.
+
+Every night, the system reconciles the two sides: for every access event in the audit log, was there a matching justification on file? If yes, no action. If no — or if the access happened outside the declared time window — a Jira ticket is created for the security team to review.
+
+The result is a complete, tamper-resistant record that answers the auditor's question: for every production data access, here is who did it, here is why they said they were doing it, and here is whether those two things matched.
 
 ## Architecture
 
@@ -62,65 +62,32 @@ flowchart LR
     Recon -->|create ticket per violation| Jira
 ```
 
-**`slack-access-request-handler`** validates the Slack HMAC signature, opens a Block Kit modal collecting a Jira ticket ID, justification, and duration (15, 30, or 60 minutes). Slack payloads don't include user email by design, so the Lambda calls `users.info` with `users:read.email` to resolve it before writing the access window to DynamoDB:
+The diagram shows the full flow. Walking through it from left to right:
 
-```python
-item = {
-    "request_id": str(uuid.uuid4()),
-    "user_email": resolved_email,       # resolved via Slack API, not from payload
-    "jira_issue_id": jira_key,
-    "justification": justification,
-    "duration_minutes": minutes,
-    "request_timestamp": now_iso,       # when the request was submitted
-    "expiry_timestamp": expiry_iso,     # request_timestamp + duration_minutes
-    "ttl": retention_ttl_epoch,         # 7-year retention period, not the access window
-}
-```
+**Storing justifications.** When a developer files a Slack request, the handler resolves their real identity — Slack payloads intentionally don't carry email, so it calls the Slack API — and writes a time-bounded record: who, why, which ticket, and for how long. Nothing is approved. Nothing is blocked.
 
-The TTL is set to the compliance retention period, not the access window. The access window lives in `request_timestamp` and `expiry_timestamp` and is used only by the reconciliation logic.
+**Collecting evidence.** CloudTrail Lake is the central audit store. S3 object-level events flow in natively. For everything else — currently RDS PostgreSQL and HashiCorp Vault — a forwarder Lambda subscribes to their CloudWatch log groups, parses each log line into a normalized event, and pushes it to CloudTrail Lake via a custom ingestion channel. Adding a new data source follows the same pattern: subscribe to its log stream, write a parser for its log format, and push normalized events. The reconciliation architecture stays unchanged, but the parser is new code for each source.
 
-**`audit-log-ctl-forwarder`** subscribes to the RDS PostgreSQL and Vault audit CloudWatch log groups. It parses each line, drops noise (non-prod paths, unmonitored databases, unparseable lines), and forwards valid connection and credential-issuance events to a CloudTrail Lake custom ingestion channel via `cloudtrail-data:PutAuditEvents`. Database events land in a separate curated event data store, queryable alongside native S3 events using the same SQL interface.
+**Correlating the two sides.** The nightly job matches access events to justifications using email as the shared key. CloudTrail records IAM identities; the justification store holds emails resolved from Slack at request time. Bridging those two is the most fragile part of the system — the identity formats differ across S3, database, and Vault access paths — but it's what makes correlation work without a separate identity mapping service.
 
-**`daily-reconciliation`** runs at 03:00 UTC. It queries CloudTrail Lake for the previous day's events:
-
-```sql
-SELECT eventTime, eventName,
-       userIdentity.principalId AS principalId,
-       element_at(requestParameters, 'bucketName') AS reqBucketName,
-       element_at(requestParameters, 'key')        AS reqObjectKey
-FROM {event_data_store_id}
-WHERE eventTime >= TIMESTAMP '2024-01-14 00:00:00'
-  AND eventTime <= TIMESTAMP '2024-01-14 23:59:59'
-  AND eventSource = 's3.amazonaws.com'
-  AND eventName IN ('GetObject', 'PutObject', 'DeleteObject', 'RestoreObject')
-```
-
-Each event is correlated against DynamoDB windows using email as the primary key. The email extraction is the messiest part: for S3, the email is embedded in the SSO assumed role session name inside `principalId` (format: `AROAXXX:user@example.com`). For database events, Vault's `auth_display_name` carries the OIDC identity, linked back to the DB session via a `VaultCredsIssued` event ingested by the forwarder.
+**Whitelisting non-human actors.** Kubernetes service accounts, IAM roles, and AWS-managed services access the same buckets and databases developers do. Known automated actors are categorized and suppressed so they don't flood the violation queue. Anything unrecognized is surfaced in a separate non-human group for review — so automated activity is never silently ignored, just handled separately from human access.
 
 ## The nuance most approval tools miss
 
 Because CDAA doesn't block access, it has to handle a case that gating tools never see: the developer who accesses production first, then files the Slack request retroactively.
 
-The window check is three lines:
-
-```python
-request_start_epoch = parse_time_to_epoch(req["timestamp"])
-request_end_epoch = request_start_epoch + 60 * int(req["duration_minutes"])
-access_within_window = request_start_epoch <= event_epoch <= request_end_epoch
-```
-
-An event before `request_start_epoch` fails the left-side bound. It produces an `ACCESS_OUTSIDE_WINDOW` violation — the same type as an event after the window expires. The system doesn't reward retroactive justification.
+An access event is only valid if it falls strictly within the declared window — after the request was submitted and before the window expired. Access before the request timestamp is treated identically to access after expiry. The system doesn't reward retroactive justification.
 
 The full violation taxonomy:
 
-| Situation | Violation type | Severity |
+| Situation | Classification | Severity |
 |---|---|---|
-| No request at all | `UNAUTHORIZED_ACCESS` | High |
-| Event before `request_timestamp` | `ACCESS_OUTSIDE_WINDOW` | Medium |
-| Event after `request_timestamp + duration` | `ACCESS_OUTSIDE_WINDOW` | Medium |
-| Unrecognized non-human actor | reported separately | varies |
+| No justification on file | Unauthorized access | High |
+| Access before the request was submitted | Outside declared window | Medium |
+| Access after the window expired | Outside declared window | Medium |
+| Unrecognized automated actor | Reviewed separately | — |
 
-The non-human path matters because Kubernetes service accounts, IAM roles, and AWS-managed services access the same S3 buckets. Known service actors are whitelisted by category (`SERVICE_PRINCIPAL`, `SERVICE_ACCOUNT`, `AWS_SERVICE`) and suppressed. Remaining unrecognized automated access is reported in a separate non-human group so it can be reviewed and either whitelisted or investigated without polluting the human violation queue.
+The non-human path matters because IAM roles and AWS-managed services access the same S3 buckets and databases developers do. Known automated actors are whitelisted and suppressed. Anything unrecognized surfaces in a separate group for review — so automated activity is never silently ignored, just kept out of the human violation queue.
 
 ## What a violation actually looks like
 
@@ -134,15 +101,19 @@ None of those were malicious. All three were real compliance gaps. In the old wo
 
 **Daily reconciliation, not real-time.** CloudTrail Lake queries are pay-per-byte-scanned. A nightly batch over a full day of events is significantly cheaper than streaming correlation. The frameworks listed above don't require real-time detection; the compliance evidence just needs to exist and be auditable. A one-day lag is acceptable and the batch approach is far simpler to operate.
 
-**Email as the correlation key.** CloudTrail uses IAM identities. DynamoDB stores the email resolved from Slack at request time. Bridging those two requires extracting email from SSO session names, stripping Vault OIDC prefixes from `auth_display_name`, and falling back to IAM user `owner` tags for programmatic users. It's the most fragile coupling in the system, but it's also what makes the correlation reliable across S3, RDS, and Vault access paths without requiring a separate identity mapping service.
+Rough cost: for most teams, CloudTrail Lake stays well under $10/month — S3 event ingestion and nightly queries are cheap at the volumes most engineering teams produce. The expensive piece is CloudWatch Logs from RDS. If you run pgaudit with verbose settings, a busy database can generate several GB of logs per day at $0.50/GB ingestion. Scope the database audit filter to only the databases you actually need to cover.
+
+**Email as the correlation key.** CloudTrail records IAM identities. The justification store holds email addresses resolved from Slack at request time. Bridging those two — across S3, RDS, and Vault access paths, each with a different identity format — is the most fragile coupling in the system, but it's what makes correlation work without a separate identity mapping service.
 
 ## What you get
 
-The security team works a Jira queue instead of digging through CloudTrail logs. The audit trail is tamper-resistant: CloudTrail Lake records can't be deleted by the team being audited, and DynamoDB items carry a long-retention TTL set independently of the access window. Extending coverage to a new data store means adding a CloudWatch log subscription and a query against the curated event data store — the reconciliation core stays unchanged.
+The security team works a Jira queue instead of digging through CloudTrail logs. Each violation ticket carries the full context needed to review it without going back to the logs: who triggered it, what they accessed and when, whether a justification was on file, what window was declared, and the exact mismatch. The audit records are retained for the compliance retention period independently of the access window, and CloudTrail Lake records can't be deleted by the team being audited.
+
+Current coverage: S3 object-level access, RDS PostgreSQL connections, and HashiCorp Vault credential issuance. Kubernetes pod-level access is not covered — workload identity correlation would require a separate ingestion path. Extending to a new data store means writing a parser for its log format, wiring in a new CloudWatch subscription, and potentially updating the reconciliation queries — the correlation architecture stays the same, but it's not plug-and-play.
 
 ---
 
-For the full configuration reference, Terraform variable descriptions, and SSM secret setup, see the [module README](../cdaa/README.md).
+For the full configuration reference, Terraform variable descriptions, and SSM secret setup, see the [module README](../cdaa/README.md). Part of the [Compliance engineering](../) series.
 
 ---
 
