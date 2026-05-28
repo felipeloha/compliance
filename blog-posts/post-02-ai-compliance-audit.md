@@ -60,6 +60,24 @@ flowchart LR
     end
 ```
 
+## Try it in 5 minutes
+
+The `samples/` directory has fictional policy documents for AM, HR, and IDM — enough to
+run a real audit without a Vanta account.
+
+```bash
+git clone https://github.com/felipelopezhamann/compliance
+cd compliance-audit
+uv sync --group dev
+```
+
+Open `prompts/template.md` in Claude Code or Cursor. Replace `{FAMILY}` with `AM` and
+`{FRAMEWORK}` with `c5`. Run it. Results land in `audits/c5/results/am_result.md`.
+
+The sample produces realistic output: scores of 5–6 because the evidence is
+procedure-level with no operational evidence — exactly as expected. From there,
+swap in your own documents and re-run.
+
 ## How it works
 
 ### The mapping.csv
@@ -93,9 +111,14 @@ grep needs_manual_fetch audits/c5/mapping.csv
 
 ### The prompt template
 
-The audit prompt is a single Markdown file. The key design choice is that the **control
-checklist is the ground truth**, not the evidence index. The agent must produce one row
-per control in the req file, even if there is zero evidence.
+The audit prompt is a single Markdown file you open in your AI coding assistant —
+Claude Code, Cursor, or any agent that can read local files. No SDK, no framework,
+no wiring. Fill in two variables and run it.
+
+The key design choice is that the **control checklist is the ground truth**, not the
+evidence index. The agent must produce one row per control in the req file, even if
+there is zero evidence. The full prompt is in
+[`compliance-audit/prompts/template.md`](../compliance-audit/prompts/template.md).
 
 Before scoring, the agent classifies each document into one of three content tiers by
 reading it — not by trusting the `doc_type` field in the CSV:
@@ -161,11 +184,15 @@ prompt gave scores of 0 for URL-only controls. The problem: 0/10 looks the same 
 exists but is not locally available yet". Using `N/A` + `Incomplete` keeps the
 distinction visible and makes audit completeness a first-class metric.
 
-**AI scores as first pass, not final verdict.** The prompt explicitly instructs the
-agent to flag borderline scores (4-7 range) as requiring human validation. Scores in
-the 8-10 range where dates are not visible are flagged for recency check. The tool
-produces a structured first draft that an engineer can verify in a few hours rather
-than building from scratch in a few weeks.
+**AI scores as first pass, not final verdict.** The prompt flags borderline scores
+(4–7 range) and any control where recency couldn't be determined for human validation.
+
+In practice, reviewing a 17-family C5 audit takes 2–4 hours for a security engineer
+who knows the controls — focused on borderline calls and `doc_type` mismatches, not
+reading documents from scratch. Roughly 20–30% of borderline scores get adjusted after
+review: usually upward when a document is more operational than the agent credited, or
+downward when a procedure looks comprehensive but doesn't address the specific control
+requirement.
 
 ## What you get out of it
 
@@ -174,6 +201,11 @@ runs in minutes. The agent reads every document, classifies it, and scores every
 while you're doing something else. The human review that follows is hours, not weeks —
 focused on borderline scores and missing evidence rather than reading policy docs from
 scratch.
+
+A typical family audit — 5–10 documents, each a few pages — sits well inside a 200K
+context window. For frameworks with many large PDFs, you can audit one control at a
+time; the mapping structure supports this since each row already scopes evidence to a
+family or a specific control.
 
 The second win is re-runnability. Fix a gap, update the document, run the affected
 family again. The rest of the scores stay untouched. You don't re-read the full
@@ -195,6 +227,7 @@ Full configuration reference: [compliance-audit/README.md](../compliance-audit/R
 
 ---
 
-How does your team handle evidence collection for compliance audits? Do you pull it
-programmatically, maintain it manually, or accept the spreadsheet chaos and schedule
-a sprint for it every year?
+If you've tried to automate any part of a compliance audit — bootstrapping an evidence
+index, classifying documents, or getting consistent scores across cycles — I'd like to
+hear where it broke down. The parts I found hardest to automate are the ones where the
+answer genuinely depends on context that isn't in the document.
