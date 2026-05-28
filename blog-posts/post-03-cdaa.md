@@ -30,7 +30,7 @@ The standard answer is "approve before access" — block the developer until som
 
 The problem is that blocking is exactly the wrong behavior during an incident. The moment production is on fire and a developer needs to understand what's happening is precisely when a gated approval queue creates the most damage.
 
-The useful middle ground is **frictionless declaration of intent + automated post-hoc detection**. The developer declares what they're about to do, accesses production, and the system catches anything that didn't match the next morning. No blocking. No slow path for incident response. Full audit trail. And critically: the system doesn't reward retroactive justification — if you access production first and file the Slack request after, that's still a violation.
+The useful middle ground is **frictionless declaration of intent + automated post-hoc detection**. The developer declares what they're about to do, accesses production, and the system catches anything that didn't match the next morning. No blocking. No slow path for incident response. Full audit trail.
 
 ## Approach
 
@@ -100,10 +100,6 @@ None of those were malicious. All three were real compliance gaps. In the old wo
 **No approval gate.** Blocking access until a request is approved would slow down incident response — exactly when developers most need quick access to understand what's happening in production. The accountability layer (a Jira ticket assigned to you if you access without a valid window) creates the right incentive without blocking legitimate emergency access.
 
 **Daily reconciliation, not real-time.** CloudTrail Lake queries are pay-per-byte-scanned. A nightly batch over a full day of events is significantly cheaper than streaming correlation. The frameworks listed above don't require real-time detection; the compliance evidence just needs to exist and be auditable. A one-day lag is acceptable and the batch approach is far simpler to operate.
-
-Rough cost: for most teams, CloudTrail Lake stays well under $10/month — S3 event ingestion and nightly queries are cheap at the volumes most engineering teams produce. The expensive piece is CloudWatch Logs from RDS. If you run pgaudit with verbose settings, a busy database can generate several GB of logs per day at $0.50/GB ingestion. Scope the database audit filter to only the databases you actually need to cover.
-
-**Email as the correlation key.** CloudTrail records IAM identities. The justification store holds email addresses resolved from Slack at request time. Bridging those two — across S3, RDS, and Vault access paths, each with a different identity format — is the most fragile coupling in the system, but it's what makes correlation work without a separate identity mapping service.
 
 ## What you get
 
